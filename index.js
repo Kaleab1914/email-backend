@@ -1,94 +1,107 @@
-// index.js
 const express = require("express");
-const bodyParser = require("body-parser");
 const nodemailer = require("nodemailer");
 const cors = require("cors");
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+require('dotenv').config(); // Load environment variables from .env
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware - extended CORS configuration for Flutter
+// Middleware setup
 app.use(cors({
-  origin: '*', // Allow all origins (or replace with your Flutter app URL)
+  origin: '*',
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
-app.use(bodyParser.json());
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-// Nodemailer transporter
-let transporter = nodemailer.createTransport({
+// Ensure uploads folder exists
+if (!fs.existsSync('uploads')) fs.mkdirSync('uploads');
+
+// Multer setup
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => cb(null, 'uploads/'),
+    filename: (req, file, cb) => {
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+      cb(null, uniqueSuffix + path.extname(file.originalname));
+    }
+  }),
+  limits: { fileSize: 5 * 1024 * 1024, fields: 10 },
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'application/pdf'];
+    if (allowedTypes.includes(file.mimetype)) cb(null, true);
+    else cb(new Error('Only image files (JPEG, PNG, GIF) or PDFs are allowed'));
+  }
+});
+
+// Nodemailer setup
+const transporter = nodemailer.createTransport({
   host: "smtp.gmail.com",
   port: 465,
-  secure: true, // SSL
+  secure: true,
   auth: {
-    user: process.env.EMAIL_USER,   // from .env or Railway variable
-    pass: process.env.EMAIL_PASS,   // from .env or Railway variable
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS,
   },
 });
 
 // Email endpoint
-app.post("/send-email", async (req, res) => {
+app.post("/send-email", upload.single('image'), async (req, res) => {
   try {
-    if (!req.body) {
-      return res.status(400).json({ success: false, message: "Request body is missing" });
-    }
+    console.log("Received files:", req.file);
+    console.log("Received body:", req.body);
 
-    const {
-      name,
-      employeeId,
-      department,
-      email,
-      phone,
-      requestType,
-      priorityLevel,
-      subject,
-      description,
-    } = req.body;
+    const { name, employeeId, department, email, phone, requestType, priorityLevel, subject, description } = req.body;
 
     if (!name || !email || !subject || !description) {
-      return res.status(400).json({ 
-        success: false, 
-        message: "Missing required fields: name, email, subject, or description" 
-      });
+      if (req.file) fs.unlinkSync(req.file.path);
+      return res.status(400).json({ success: false, message: "Missing required fields" });
     }
 
-    let mailOptions = {
+    const mailOptions = {
       from: process.env.EMAIL_USER,
-      to: process.env.RECEIVER_EMAIL, // recipient
-      subject: `IT Service Request - ${subject}`,
+      to: process.env.EMAIL_TO,
+      subject: `IT Request: ${subject}`,
       html: `
-        <h2>New IT Service Request 🚀</h2>
+        <h2>New IT Service Request</h2>
         <p><b>Name:</b> ${name}</p>
-        <p><b>Employee ID:</b> ${employeeId || 'Not provided'}</p>
-        <p><b>Department:</b> ${department || 'Not provided'}</p>
+        <p><b>Employee ID:</b> ${employeeId || 'N/A'}</p>
+        <p><b>Department:</b> ${department || 'N/A'}</p>
         <p><b>Email:</b> ${email}</p>
-        <p><b>Phone:</b> ${phone || 'Not provided'}</p>
+        <p><b>Phone:</b> ${phone || 'N/A'}</p>
         <p><b>Request Type:</b> ${requestType || 'Not specified'}</p>
-        <p><b>Priority Level:</b> ${priorityLevel || 'Not specified'}</p>
+        <p><b>Priority:</b> ${priorityLevel || 'Not specified'}</p>
         <p><b>Subject:</b> ${subject}</p>
-        <p><b>Description:</b><br/> ${description}</p>
+        <p><b>Description:</b><br>${description.replace(/\n/g, '<br>')}</p>
+        ${req.file ? `<p><i>File attached: ${req.file.originalname}</i></p>` : ''}
       `,
+      attachments: req.file ? [{ filename: req.file.originalname, path: req.file.path }] : []
     };
 
-    let info = await transporter.sendMail(mailOptions);
-    console.log("Email sent ✅:", info.messageId);
-    res.status(200).json({ success: true, message: "Email sent successfully!" });
+    const info = await transporter.sendMail(mailOptions);
+    console.log("Email sent:", info.messageId);
+
+    if (req.file) fs.unlinkSync(req.file.path);
+
+    res.status(200).json({ success: true, message: "Request submitted successfully" });
   } catch (error) {
-    console.error("Error sending email ❌:", error);
-    res.status(500).json({ 
-      success: false, 
-      message: "Failed to send email",
-      error: error.message 
-    });
+    console.error("Email error:", error);
+    if (req.file) fs.unlinkSync(req.file.path);
+    res.status(500).json({ success: false, message: "Failed to process request", error: error.message });
   }
 });
 
-// Health check endpoint
-app.get("/health", (req, res) => {
-  res.status(200).json({ status: "healthy" });
-});
+// Health check
+app.get("/health", (req, res) => res.status(200).json({ status: "OK" }));
 
 // Start server
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
+process.on('SIGINT', () => {
+  console.log('Shutting down server...');
+  process.exit();
 });
